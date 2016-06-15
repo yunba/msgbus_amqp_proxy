@@ -21,7 +21,6 @@
 -compile({parse_transform, lager_transform}).
 
 -include_lib("amqp_client/include/amqp_client.hrl").
--include_lib("elog/include/elog.hrl").
 
 -record(state, {
     tref,
@@ -48,7 +47,7 @@
 %% API Function Exports
 %% ------------------------------------------------------------------
 
--export([start_link/0, start_link/1, test/0, close/1, unsubscribe/0]).
+-export([start_link/0, start_link/1, test/0, close/1, unsubscribe/0, subscribe/0]).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Exports
@@ -84,8 +83,6 @@ subscribe() ->
 %% ------------------------------------------------------------------
 
 init({Params, OutgoingQueues, IncomingQueues, NodeTag}) ->
-
-    % io:format("Params: ~p~n", [Params]),
     {ok, Receiver} = application:get_env(receiver_module),
     Stat = case application:get_env(stat_module) of
                {ok, StatModule} ->
@@ -110,7 +107,7 @@ init({Params, OutgoingQueues, IncomingQueues, NodeTag}) ->
         port = config_val(amqp_port, Params, 5672)
     },
 
-    ?INFO("Connecting to: ~p", [Name]),
+    lager:info("Connecting to: ~p", [Name]),
 
     {Connection2, Channel2, QueueInfo} =
         case amqp_channel(AmqpParams) of
@@ -120,14 +117,14 @@ init({Params, OutgoingQueues, IncomingQueues, NodeTag}) ->
                 case amqp_channel:call(Channel,
                     #'exchange.declare'{exchange = Exchange, type = <<"topic">>}) of
                     #'exchange.declare_ok'{} ->
-                        ?INFO("declare exchange succeeded: ~p", [Exchange]);
+                        lager:info("declare exchange succeeded: ~p", [Exchange]);
                     Return ->
-                        ?ERROR("declare exchange failed: ~p", [Return])
+                        lager:error("declare exchange failed: ~p", [Return])
                 end,
 
                 % Subscribe incoming queues
                 SubscribeInfo = [subscribe_incoming_queues(Key, Queue, Exchange, Channel, NodeTag) || {Key, Queue} <- IncomingQueues],
-                ?DEBUG("Subscribe queue Info ~p", [SubscribeInfo]),
+                lager:debug("Subscribe queue Info ~p", [SubscribeInfo]),
 
                 declare_and_bind_outgoing_queues(Channel, Exchange, OutgoingQueues),
 
@@ -144,7 +141,7 @@ init({Params, OutgoingQueues, IncomingQueues, NodeTag}) ->
                 {Connection, Channel, SubscribeInfo};
             _Error ->
                 Interval = 10,
-                ?ERROR("amqp_channel failed. will try again after ~p s", [Interval]),
+                lager:error("amqp_channel failed. will try again after ~p s", [Interval]),
                 % exit the client after 10 seconds, let the supervisor recreate it
                 timer:exit_after(timer:seconds(Interval), "Connect failed"),
                 {undefined, undefined, []}
@@ -200,15 +197,15 @@ handle_call(subscribe, _From,  #state{channel = Channel,
                               amqp_channel:subscribe(Channel, #'basic.consume'{queue = ConsumeQueue,
                                   consumer_tag = ConsumerTag, no_ack = true}, self())
                           }  || {ConsumeQueue, {_, ConsumerTag}} <- QueueInfo],
-                ?DEBUG("Resume Consumer \n old info ~p \n new info ~p", [QueueInfo, NewQueueInfo]),
+                lager:debug("Resume Consumer \n old info ~p \n new info ~p", [QueueInfo, NewQueueInfo]),
                 State#state{is_unsubscribe = false, queue_info=NewQueueInfo}
     end,
     {reply, ok, State2};
 
 handle_call(close, _From, #state{connection = Connection, channel = Channel} = State) ->
-    ?DEBUG("~p", [<<"close channel">>]),
+    lager:debug("~p", [<<"close channel">>]),
     amqp_channel:close(Channel),
-    ?DEBUG("~p", [<<"close connection">>]),
+    lager:debug("~p", [<<"close connection">>]),
     amqp_connection:close(Connection),
     {reply, ok, State};
 
@@ -243,7 +240,7 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info({'DOWN', Ref, Type, Pid, Info}, State = #state{priority = Priority}) ->
-    ?INFO("DOWN: ~p", [{Ref, Type, Pid, Info}]),
+    lager:info("DOWN: ~p", [{Ref, Type, Pid, Info}]),
 
     GroupName = "msgbus_amqp_clients_" ++ integer_to_list(Priority),
     MyPid = self(),
@@ -260,13 +257,13 @@ handle_info({'DOWN', Ref, Type, Pid, Info}, State = #state{priority = Priority})
 
     {noreply, State};
 handle_info(#'basic.consume_ok'{consumer_tag = CTag}, State) ->
-    ?INFO("Consumer Tag: ~p", [CTag]),
+    lager:info("Consumer Tag: ~p", [CTag]),
     {noreply, State};
-handle_info({#'basic.deliver'{consumer_tag = CTag,
-    delivery_tag = DeliveryTag,
-    exchange = Exch,
-    routing_key = RK},
-    #amqp_msg{payload = Data} = Content} = AmqpPackage,
+handle_info({#'basic.deliver'{consumer_tag = _CTag,
+    delivery_tag = _DeliveryTag,
+    exchange = _Exch,
+    routing_key = _RK},
+    #amqp_msg{payload = Data} = _Content} = AmqpPackage,
     #state{amqp_package_recv_count = Recv,
         channel = Channel,
         queue_info = QueueInfo,
@@ -275,31 +272,22 @@ handle_info({#'basic.deliver'{consumer_tag = CTag,
         is_unsubscribe = IsUnsubscribe,
         stat_module = StatModule,
         receiver_module = ReceiverModule} = State) ->
-%%   ?INFO("ConsumerTag: ~p"
-%%   "~nDeliveryTag: ~p"
-%%   "~nExchange: ~p"
-%%   "~nRoutingKey: ~p"
-%%   "~nContent: ~p"
-%%   "~n",
-%%     [CTag, DeliveryTag, Exch, RK, Content]),
-%%   ?INFO("Data: ~p", [Data]),
-    %% fixme
 
     Pid = whereis(ReceiverModule),
     State3 = case Pid of
                  undefined ->   %% waiting for ReceiverModule come up, should use timer:sleep()?
-                     ?WARN("No Pid for ~p", [ReceiverModule]),
+                     lager:warning("No Pid for ~p", [ReceiverModule]),
                      self() ! AmqpPackage,
                      State;
                  _ ->
                      {message_queue_len, Len} = erlang:process_info(Pid, message_queue_len),
                      ConsumeMsgLen = ConsumerCheckInterval * MsgRate,
-                     ?DEBUG("QueueLen ~p, config ~p", [Len, ConsumeMsgLen]),
+                     lager:debug("QueueLen ~p, config ~p", [Len, ConsumeMsgLen]),
                      State2 = case {Len > ConsumeMsgLen, IsUnsubscribe} of
                                   {true, false} ->
-                                      ?CRITICAL("msgq length ~p > config leng ~p", [Len, ConsumeMsgLen]),
+                                      lager:critical("msgq length ~p > config leng ~p", [Len, ConsumeMsgLen]),
                                       unsubscribe_incomming_queues(Channel, QueueInfo),
-                                      ?WARN_MSG("Pause Consumer"),
+                                      lager:warning("Pause Consumer"),
                                       State#state{is_unsubscribe = true};
                                   _ ->
                                       State
@@ -367,7 +355,7 @@ handle_info({timeout, _Ref, check_consumer}, #state{channel = Channel,
                                      no_ack = true},
                                  self())
                          }  || {ConsumeQueue, {_, ConsumerTag}} <- QueueInfo],
-                     ?WARN("Resume Consumer \n old info ~p \n new info ~p", [QueueInfo, NewQueueInfo]),
+                     lager:warning("Resume Consumer \n old info ~p \n new info ~p", [QueueInfo, NewQueueInfo]),
                      State#state{is_unsubscribe = false, queue_info=NewQueueInfo}
              end,
     TRef = erlang:start_timer(ConsumerCheckInterval * 1000, self(), check_consumer),
@@ -387,7 +375,7 @@ terminate(Reason, _State=#state{channel=Channel,
             ignore
     end,
     erlang:cancel_timer(TimeRef),
-    ?DEBUG("proxy client terminated ~p", [Reason]),
+    lager:debug("proxy client terminated ~p", [Reason]),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -413,7 +401,7 @@ config_val(C, Params, Default) ->
     case lists:keyfind(C, 1, Params) of
         {C, V} -> V;
         _ ->
-            ?INFO("Default: ~p", [Default]),
+            lager:info("Default: ~p", [Default]),
             Default
     end.
 
@@ -456,9 +444,9 @@ unsubscribe_incomming_queues(Channel, QueueInfo) ->
             {Queue, {'basic.consume_ok', ConsumerTag}} ->
                 Method = #'basic.cancel'{consumer_tag = ConsumerTag},
                 Result = amqp_channel:call(Channel, Method),
-                ?DEBUG("Unsubscribe queue succee ~p Result ~p", [Queue, Result]);
+                lager:debug("Unsubscribe queue succee ~p Result ~p", [Queue, Result]);
             {Queue, {Other, _ComsumerTag}} ->
-                ?DEBUG("Queue does not consumer ~p, ~p", [Queue, Other])
+                lager:debug("Queue does not consumer ~p, ~p", [Queue, Other])
         end
     end, QueueInfo).
 
@@ -477,10 +465,10 @@ subscribe_incoming_queues(Key, Queue, Exchange, Channel, NodeTag) ->
                 #'basic.consume'{queue = ConsumeQueue,
                     no_ack = true},
                 self()),
-            ?DEBUG("Tag: ~p", [Tag]),
+            lager:debug("Tag: ~p", [Tag]),
             Tag;
         Return2 ->
-            ?ERROR("declare queue failed: ~p", [Return2]),
+            lager:error("declare queue failed: ~p", [Return2]),
             <<"tag-error">>
     end,
 
@@ -498,10 +486,10 @@ subscribe_incoming_queues(Key, Queue, Exchange, Channel, NodeTag) ->
         routing_key = RoutingKey},
     case amqp_channel:call(Channel, Binding) of
         #'queue.bind_ok'{} ->
-            ?INFO("Bind succeeded: ~p",
+            lager:info("Bind succeeded: ~p",
                 [{ConsumeQueue, Exchange, RoutingKey}]);
         Return3 ->
-            ?ERROR("Bind failed: ~p",
+            lager:error("Bind failed: ~p",
                 [{ConsumeQueue, Exchange, RoutingKey, Return3}])
     end,
     {ConsumeQueue, ConsumerTag}.
