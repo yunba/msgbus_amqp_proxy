@@ -451,10 +451,11 @@ unsubscribe_incomming_queues(Channel, QueueInfo) ->
     end, QueueInfo).
 
 subscribe_incoming_queues(Key, Queue, Exchange, Channel, NodeTag) ->
+    NodeTag1 = list_to_binary(integer_to_list(binary:decode_unsigned(NodeTag))),
     ConsumeQueue =
         case binary:last(Queue) of
             $_ ->
-                <<Queue/binary, NodeTag/binary>>;
+                <<Queue/binary, NodeTag1/binary>>;
             _ ->
                 Queue
         end,
