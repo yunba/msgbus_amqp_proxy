@@ -24,13 +24,12 @@
 %% ===================================================================
 %% Application callbacks
 %% ===================================================================
-
 start(_StartType, _StartArgs) ->
-  ets:new(msgbus_amqp_clients_priority_table, [public, named_table, ordered_set]),
-	{ok, Rabbitmqs} = application:get_env(rabbitmqs),
-	{ok, OutgoingQueues} = application:get_env(outgoing_queues),
-	{ok, IncomingQueues} = application:get_env(incoming_queues),
-	{ok, NodeTag} = application:get_env(node_tag),
+    ets:new(msgbus_amqp_clients_priority_table, [public, named_table, ordered_set]),
+    {ok, Rabbitmqs} = application:get_env(rabbitmqs),
+    {ok, OutgoingQueues} = application:get_env(outgoing_queues),
+    {ok, IncomingQueues} = application:get_env(incoming_queues),
+    {ok, NodeTag} = application:get_env(node_tag),
     msgbus_amqp_proxy_sup:start_link({Rabbitmqs, OutgoingQueues, IncomingQueues, NodeTag}).
 
 stop(_State) ->
