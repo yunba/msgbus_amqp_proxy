@@ -40,7 +40,8 @@
     consumer_check_interval,
     consumer_msg_rate,  %% the rate of consumer per second
     queue_info,
-    priority
+    priority,
+    ttl
 }).
 
 %% ------------------------------------------------------------------
@@ -98,6 +99,7 @@ init({Params, OutgoingQueues, IncomingQueues, NodeTag}) ->
     Level = config_val(level, Params, debug),
     Exchange = config_val(exchange, Params, list_to_binary(atom_to_list(?MODULE))),
     Priority = config_val(priority, Params, 0),
+    TTL = config_val(ttl, Params, <<"8000">>),
 
     AmqpParams = #amqp_params_network{
         username = config_val(amqp_user, Params, <<"guest">>),
@@ -172,7 +174,8 @@ init({Params, OutgoingQueues, IncomingQueues, NodeTag}) ->
         consumer_msg_rate = MsgRate,
         consumer_stat = ConsumerStat,
         queue_info = QueueInfo,
-        priority = Priority
+        priority = Priority,
+        ttl = TTL
     }}.
 
 handle_call(unsubscribe, _From,  #state{channel = Channel, queue_info = QueueInfo, is_unsubscribe = IsUnSubScribe} = State) ->
@@ -390,7 +393,7 @@ test() ->
 
 amqp_publish(Exchange, RoutingKey, Message, Channel, State) ->
     Publish = #'basic.publish'{exchange = Exchange, routing_key = RoutingKey},
-    Props = #'P_basic'{content_type = <<"application/octet-stream">>, expiration = <<"8000">>},
+    Props = #'P_basic'{content_type = <<"application/octet-stream">>, expiration = State#state.ttl},
     Msg = #amqp_msg{payload = Message, props = Props},
     amqp_channel:cast(Channel, Publish, Msg),
 
