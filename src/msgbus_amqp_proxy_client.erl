@@ -285,22 +285,26 @@ handle_info({#'basic.deliver'{consumer_tag = _CTag,
                  _ ->
                      {message_queue_len, Len} = erlang:process_info(Pid, message_queue_len),
                      ConsumeMsgLen = ConsumerCheckInterval * MsgRate,
+
                      State2 = case {Len > ConsumeMsgLen, IsUnsubscribe} of
                                   {true, false} ->
-                                      lager:critical("msgq length ~p > config leng ~p", [Len, ConsumeMsgLen]),
+                                      %lager:critical("msgq length ~p > config leng ~p", [Len, ConsumeMsgLen]),
                                       unsubscribe_incomming_queues(Channel, QueueInfo),
-                                      lager:warning("Pause Consumer"),
+                            %          lager:warning("Pause Consumer"),
                                       State#state{is_unsubscribe = true};
+                                  {true, _} ->
+					State;
                                   _ ->
                                       State
                               end,
-                     gen_server:cast(ReceiverModule, {package_from_mq, Data}),
-                     case StatModule of
-                         undefined ->
-                             ignore;
-                         _ ->
-                             StatModule:notify({mqtt_mq_recv, {inc, 1}})  %% current use folsom
-                     end,
+		      gen_server:cast(ReceiverModule, {package_from_mq, Data}),
+%                    case StatModule of
+%                        undefined ->
+%                            ignore;
+%                        _ ->
+%                            StatModule:notify({mqtt_mq_recv, {inc, 1}})  %% current use folsom
+%       			ignore
+%                    end,
                      State2#state{amqp_package_recv_count = Recv + 1}
              end,
     {noreply,State3};
@@ -348,17 +352,23 @@ handle_info({timeout, _Ref, check_consumer}, #state{channel = Channel,
                  {false, false} ->
                      State;
                  {false, true} ->
-                     NewQueueInfo = [
-                         {
-                             ConsumeQueue,
-                             amqp_channel:subscribe(Channel,
-                                 #'basic.consume'{queue = ConsumeQueue,
-                                     consumer_tag = ConsumerTag,
-                                     no_ack = true},
-                                 self())
-                         }  || {ConsumeQueue, {_, ConsumerTag}} <- QueueInfo],
-                     lager:warning("Resume Consumer \n old info ~p \n new info ~p", [QueueInfo, NewQueueInfo]),
-                     State#state{is_unsubscribe = false, queue_info=NewQueueInfo}
+                     {message_queue_len, Len} = erlang:process_info(Pid, message_queue_len),
+                     case Len == 0 of
+			true ->
+			     NewQueueInfo = [
+				 {
+				     ConsumeQueue,
+				     amqp_channel:subscribe(Channel,
+					 #'basic.consume'{queue = ConsumeQueue,
+					     consumer_tag = ConsumerTag,
+					     no_ack = true},
+					 self())
+				 }  || {ConsumeQueue, {_, ConsumerTag}} <- QueueInfo],
+			     lager:warning("Resume Consumer \n old info ~p \n new info ~p", [QueueInfo, NewQueueInfo]),
+			     State#state{is_unsubscribe = false, queue_info=NewQueueInfo};
+			_ ->
+				State
+			end
              end,
     TRef = erlang:start_timer(ConsumerCheckInterval * 1000, self(), check_consumer),
     {noreply, State2#state{tref = TRef, consumer_msg_rate = NewRate, consumer_last_stat = CurrentStat}};
